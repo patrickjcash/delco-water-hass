@@ -3,6 +3,7 @@
   "name": "Del-Co Water",
   "codeowners": ["@patrickjcash"],
   "config_flow": true,
+  "dependencies": ["recorder"],
   "documentation": "https://github.com/patrickjcash/delco-water-hass",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
