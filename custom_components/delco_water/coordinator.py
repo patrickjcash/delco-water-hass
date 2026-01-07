@@ -34,7 +34,7 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
             hass,
             _LOGGER,
             name="Del-Co Water",
-            update_interval=timedelta(hours=6),
+            update_interval=timedelta(hours=24),
         )
         self.api = api
 

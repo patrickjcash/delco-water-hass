@@ -133,7 +133,7 @@ SENSORS: tuple[DelCoWaterSensorEntityDescription, ...] = (
     ),
     DelCoWaterSensorEntityDescription(
         key="water_cost",
-        name="Total Bill this Period",
+        name="Total Bill Last Period",
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement="USD",

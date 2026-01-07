@@ -9,7 +9,7 @@ Home Assistant integration for Delaware County Water Authority (Del-Co Water) to
 - **Account monitoring** - Track current bill, previous balance, payments received, and balance due
 - **Energy Dashboard integration** - Seamless integration with Home Assistant's native Energy Dashboard
 - **Automatic statistics insertion** - Historical data is automatically backfilled on first setup
-- **Automatic updates** - Data refreshes every 6 hours
+- **Automatic updates** - Data refreshes every 24 hours
 
 **Note**: Data granularity depends on your meter type:
 - **Standard meters** (non-AMI): Monthly billing data only
