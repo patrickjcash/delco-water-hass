@@ -1,5 +1,11 @@
 # Del-Co Water Home Assistant Integration
 
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge)](https://github.com/custom-components/hacs)
+![GitHub Release](https://img.shields.io/github/v/release/patrickjcash/delco-water-hass?style=for-the-badge)
+![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg?style=for-the-badge)
+![License](https://img.shields.io/github/license/patrickjcash/delco-water-hass?style=for-the-badge)
+![IoT Class](https://img.shields.io/badge/IoT%20Class-Cloud%20Polling-yellow.svg?style=for-the-badge)
+
 Home Assistant integration for Delaware County Water Authority (Del-Co Water) to track water usage and billing data. Integrates seamlessly with Home Assistant's Energy dashboard.
 
 ## Features
@@ -17,17 +23,36 @@ Home Assistant integration for Delaware County Water Authority (Del-Co Water) to
 
 ## Installation
 
+### Prerequisites
+- Home Assistant 2024.1 or newer
+- Del-Co Water portal account (delcowaterportal.com)
+
 ### HACS (Recommended)
 
-1. Open HACS in Home Assistant
-2. Click on "Integrations"
-3. Click the three dots in the top right corner
-4. Select "Custom repositories"
-5. Add this repository URL
-6. Select "Integration" as the category
-7. Click "Add"
-8. Click "Install"
-9. Restart Home Assistant
+> **Note:** This integration is not yet published in the HACS default repository. You need to add it as a **custom repository** first.
+
+1. **Install HACS** (if not already installed)
+   - Follow the official HACS installation guide: https://hacs.xyz/docs/setup/download
+   - Restart Home Assistant after HACS installation
+
+2. **Add Custom Repository**
+
+   [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=patrickjcash&repository=delco-water-hass&category=integration)
+
+   Click the badge above to add this repository to HACS directly, OR:
+   - Open HACS in Home Assistant
+   - Click on "Integrations"
+   - Click the three dots in the top right corner
+   - Select "Custom repositories"
+   - Add this repository URL: `https://github.com/patrickjcash/delco-water-hass`
+   - Select "Integration" as the category
+   - Click "Add"
+
+3. **Install Integration**
+   - In HACS, search for "Del-Co Water"
+   - Click on the integration
+   - Click "Download"
+   - Restart Home Assistant
 
 ### Manual Installation
 
@@ -36,11 +61,15 @@ Home Assistant integration for Delaware County Water Authority (Del-Co Water) to
 
 ## Configuration
 
-1. In Home Assistant, go to Configuration > Integrations
+[![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=delco_water)
+
+1. Click the badge above to add the integration directly, OR navigate to **Settings** → **Devices & Services**
 2. Click the "+ Add Integration" button
 3. Search for "Del-Co Water"
 4. Enter your Del-Co Water portal credentials (same as delcowaterportal.com)
 5. Click Submit
+
+The integration will automatically fetch your account data and set up sensors.
 
 ## Energy Dashboard Integration
 
