@@ -209,7 +209,7 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
                 consumption_statistics[0]["start"],
             )
             async_add_external_statistics(
-                self.hass, CONSUMPTION_METADATA, consumption_statistics
+                self.hass, CONSUMPTION_METADATA, consumption_statistics, mean_type=None
             )
         else:
             _LOGGER.debug("No new consumption statistics to insert")
@@ -222,7 +222,7 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
                 cost_statistics[0]["start"],
             )
             async_add_external_statistics(
-                self.hass, COST_METADATA, cost_statistics
+                self.hass, COST_METADATA, cost_statistics, mean_type=None
             )
         else:
             _LOGGER.debug("No new cost statistics to insert")
