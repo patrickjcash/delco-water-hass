@@ -12,6 +12,7 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import DelCoWaterAPI
 from .const import (
@@ -44,9 +45,13 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
             # Authenticate and fetch data
             await self.hass.async_add_executor_job(self.api.authenticate)
             account_data = await self.hass.async_add_executor_job(self.api.get_account)
-            usage_data = await self.hass.async_add_executor_job(
-                self.api.get_usage, FREQUENCY_MONTHLY
+
+            # Fetch billing with usage from PDFs (new method)
+            billing_with_usage = await self.hass.async_add_executor_job(
+                self.api.get_billing_with_usage
             )
+
+            # Also fetch regular billing/payment for sensors
             billing_data = await self.hass.async_add_executor_job(
                 self.api.get_billing_history
             )
@@ -54,112 +59,146 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
                 self.api.get_payment_history
             )
 
+            # Keep usage API call for sensor display (shows latest month)
+            usage_data = await self.hass.async_add_executor_job(
+                self.api.get_usage, FREQUENCY_MONTHLY
+            )
+
             data = {
                 "account": account_data,
                 "usage": usage_data,
                 "billing": billing_data,
                 "payment": payment_data,
+                "billing_with_usage": billing_with_usage,
             }
 
-            # Insert statistics for Energy Dashboard
+            # Insert statistics for Energy Dashboard using PDF-parsed data
             await self._insert_statistics(data)
 
             return data
         except Exception as err:
             raise UpdateFailed(f"Error communicating with API: {err}") from err
 
-    async def _insert_statistics(self, data: dict) -> None:
-        """Insert long-term statistics for consumption and cost.
+    def _parse_service_date(self, date_str: str) -> datetime:
+        """Parse service date (MM/DD/YY) to timezone-aware datetime.
 
-        This method follows the Opower pattern for backfilling historical data
-        into Home Assistant's statistics database. The Energy Dashboard uses
-        these statistics, not the sensor values directly.
+        Uses Home Assistant's local timezone to ensure dates appear correctly
+        in the Energy Dashboard regardless of UTC offset.
+
+        Args:
+            date_str: Date in MM/DD/YY format (e.g., "08/29/25")
+
+        Returns:
+            Timezone-aware datetime at noon local time (to avoid date shifts)
         """
-        # Get last inserted statistics to avoid duplicates
-        # On first run, this will return empty, which is fine
+        # Parse the date
+        dt = datetime.strptime(date_str, "%m/%d/%y")
+
+        # Get HA's configured timezone
+        local_tz = dt_util.get_time_zone(self.hass.config.time_zone)
+
+        # Set to noon local time to avoid any date boundary issues
+        # when converting to/from UTC
+        dt = dt.replace(hour=12, minute=0, second=0, microsecond=0)
+
+        # Make timezone-aware in local timezone, then convert to UTC
+        # (HA statistics are stored in UTC)
+        if local_tz:
+            dt = dt.replace(tzinfo=local_tz)
+            dt = dt.astimezone(timezone.utc)
+        else:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt
+
+    async def _get_last_stat_time(self, statistic_id: str) -> datetime | None:
+        """Get the timestamp of the last inserted statistic."""
         try:
             last_stats = await get_instance(self.hass).async_add_executor_job(
                 get_last_statistics,
                 self.hass,
                 1,
-                STATISTIC_CONSUMPTION,
+                statistic_id,
                 True,
                 set(),
             )
-            _LOGGER.debug("get_last_statistics returned: %s", last_stats)
+
+            if last_stats and statistic_id in last_stats:
+                stats_list = last_stats[statistic_id]
+                if stats_list and len(stats_list) > 0:
+                    last_stat = stats_list[0]
+                    if "start" in last_stat:
+                        return datetime.fromtimestamp(
+                            last_stat["start"], tz=timezone.utc
+                        )
         except Exception as err:
-            _LOGGER.warning("Failed to get last statistics: %s", err)
-            last_stats = {}
+            _LOGGER.warning("Failed to get last statistics for %s: %s", statistic_id, err)
 
-        last_consumption_time = None
-        if last_stats and STATISTIC_CONSUMPTION in last_stats:
-            stats_list = last_stats[STATISTIC_CONSUMPTION]
-            if stats_list and len(stats_list) > 0:
-                last_stat = stats_list[0]
-                _LOGGER.debug("Last stat entry: %s", last_stat)
-                # StatisticsRow has 'start' as a float timestamp
-                if "start" in last_stat:
-                    last_consumption_time = datetime.fromtimestamp(
-                        last_stat["start"], tz=timezone.utc
-                    )
-                    _LOGGER.debug("Last consumption time: %s", last_consumption_time)
-                else:
-                    _LOGGER.warning("Last stat missing 'start' key: %s", last_stat)
+        return None
 
-        # Parse usage history from API
-        usage = data.get("usage", {}).get("usage", {})
-        usage_history = usage.get("usageHistory", [])
+    async def _insert_statistics(self, data: dict) -> None:
+        """Insert long-term statistics for consumption and cost.
 
-        if not usage_history:
-            _LOGGER.debug("No usage history data available")
+        This method uses PDF-parsed billing data to insert aligned usage and
+        cost statistics. Both are recorded at the service_to (meter read) date
+        to ensure proper alignment in the Energy Dashboard.
+        """
+        billing_with_usage = data.get("billing_with_usage", [])
+
+        if not billing_with_usage:
+            _LOGGER.warning("No billing data with usage available from PDFs")
             return
 
-        # Extract usage data points (HGAL format)
-        usage_data_list = usage_history[0].get("usageData", [])
+        # Get last inserted statistics to avoid duplicates
+        last_consumption_time = await self._get_last_stat_time(STATISTIC_CONSUMPTION)
+        last_cost_time = await self._get_last_stat_time(STATISTIC_COST)
 
-        if not usage_data_list:
-            _LOGGER.debug("No usage data points available")
-            return
+        _LOGGER.debug("Last consumption time: %s", last_consumption_time)
+        _LOGGER.debug("Last cost time: %s", last_cost_time)
 
-        # Build consumption statistics with cumulative sum
+        # Build statistics lists
         consumption_statistics = []
+        cost_statistics = []
         consumption_sum = 0.0
+        cost_sum = 0.0
 
-        for data_point in usage_data_list:
-            # Parse period "2025-01" to timestamp
-            period_str = data_point.get("period")
-            value_str = data_point.get("value")
-
-            if not period_str or not value_str:
-                continue
-
+        # Process billing data (already sorted by service_to in API)
+        for bill in billing_with_usage:
             try:
-                # Convert period to month start timestamp
-                period_start = datetime.strptime(period_str, "%Y-%m").replace(
-                    day=1, hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
-                )
+                # Parse service_to date as the statistics timestamp
+                # This is when the meter was read
+                period_start = self._parse_service_date(bill["service_to"])
 
-                # Skip if we've already inserted this period
-                if last_consumption_time and period_start <= last_consumption_time:
-                    # Still need to add to sum for correct cumulative calculation
-                    gallons = float(value_str) * 100  # Convert HGAL to gallons
-                    consumption_sum += gallons
-                    continue
+                # Get values
+                gallons = float(bill["usage_gallons"])
+                cost = float(bill["charges"])
 
-                # Convert HGAL to gallons
-                gallons = float(value_str) * 100
+                # Update cumulative sums (always, even for skipped periods)
                 consumption_sum += gallons
+                cost_sum += cost
 
-                consumption_statistics.append(
-                    StatisticData(
-                        start=period_start,
-                        state=gallons,  # This period's usage
-                        sum=consumption_sum,  # Cumulative total
+                # Insert consumption statistic if not already present
+                if not last_consumption_time or period_start > last_consumption_time:
+                    consumption_statistics.append(
+                        StatisticData(
+                            start=period_start,
+                            state=gallons,  # This period's usage
+                            sum=consumption_sum,  # Cumulative total
+                        )
                     )
-                )
 
-            except (ValueError, TypeError) as err:
-                _LOGGER.warning("Failed to parse usage data point %s: %s", data_point, err)
+                # Insert cost statistic if not already present
+                if not last_cost_time or period_start > last_cost_time:
+                    cost_statistics.append(
+                        StatisticData(
+                            start=period_start,
+                            state=cost,  # This period's cost
+                            sum=cost_sum,  # Cumulative total
+                        )
+                    )
+
+            except (ValueError, TypeError, KeyError) as err:
+                _LOGGER.warning("Failed to process billing record %s: %s", bill, err)
                 continue
 
         # Insert consumption statistics
@@ -169,107 +208,11 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
                 len(consumption_statistics),
                 consumption_statistics[0]["start"],
             )
-            async_add_external_statistics(self.hass, CONSUMPTION_METADATA, consumption_statistics)
-
-        # Insert cost statistics from billing data
-        await self._insert_cost_statistics(data)
-
-    async def _insert_cost_statistics(self, data: dict) -> None:
-        """Insert cost statistics from billing history.
-
-        Billing data format:
-        {
-            "accountId": "...",
-            "billing": [
-                {
-                    "billDate": "2025-01-15",
-                    "billAmount": "41.1",
-                    "readDate": "2025-01-07"
-                },
-                ...
-            ]
-        }
-        """
-        # Get last inserted cost statistics
-        try:
-            last_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics,
-                self.hass,
-                1,
-                STATISTIC_COST,
-                True,
-                set(),
+            async_add_external_statistics(
+                self.hass, CONSUMPTION_METADATA, consumption_statistics
             )
-            _LOGGER.debug("get_last_statistics (cost) returned: %s", last_stats)
-        except Exception as err:
-            _LOGGER.warning("Failed to get last cost statistics: %s", err)
-            last_stats = {}
-
-        last_cost_time = None
-        if last_stats and STATISTIC_COST in last_stats:
-            stats_list = last_stats[STATISTIC_COST]
-            if stats_list and len(stats_list) > 0:
-                last_stat = stats_list[0]
-                if "start" in last_stat:
-                    last_cost_time = datetime.fromtimestamp(
-                        last_stat["start"], tz=timezone.utc
-                    )
-                    _LOGGER.debug("Last cost time: %s", last_cost_time)
-
-        # Parse billing history
-        billing = data.get("billing", {}).get("billing", [])
-
-        if not billing:
-            _LOGGER.debug("No billing history data available")
-            return
-
-        # Build cost statistics with cumulative sum
-        cost_statistics = []
-        cost_sum = 0.0
-
-        for bill in billing:
-            bill_date_str = bill.get("billDate")
-            bill_amount_str = bill.get("billAmount")
-
-            if not bill_date_str or not bill_amount_str:
-                continue
-
-            try:
-                # Parse bill date "2025-01-15" to timestamp (use read date for period alignment)
-                read_date_str = bill.get("readDate")
-                if read_date_str:
-                    # Use read date to align with usage period
-                    period_start = datetime.strptime(read_date_str, "%Y-%m-%d").replace(
-                        hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
-                    )
-                else:
-                    # Fall back to bill date
-                    period_start = datetime.strptime(bill_date_str, "%Y-%m-%d").replace(
-                        hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
-                    )
-
-                # Skip if we've already inserted this period
-                if last_cost_time and period_start <= last_cost_time:
-                    # Still need to add to sum for correct cumulative calculation
-                    cost = float(bill_amount_str)
-                    cost_sum += cost
-                    continue
-
-                # Parse cost
-                cost = float(bill_amount_str)
-                cost_sum += cost
-
-                cost_statistics.append(
-                    StatisticData(
-                        start=period_start,
-                        state=cost,  # This bill's amount
-                        sum=cost_sum,  # Cumulative total
-                    )
-                )
-
-            except (ValueError, TypeError) as err:
-                _LOGGER.warning("Failed to parse billing data point %s: %s", bill, err)
-                continue
+        else:
+            _LOGGER.debug("No new consumption statistics to insert")
 
         # Insert cost statistics
         if cost_statistics:
@@ -278,4 +221,8 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
                 len(cost_statistics),
                 cost_statistics[0]["start"],
             )
-            async_add_external_statistics(self.hass, COST_METADATA, cost_statistics)
+            async_add_external_statistics(
+                self.hass, COST_METADATA, cost_statistics
+            )
+        else:
+            _LOGGER.debug("No new cost statistics to insert")

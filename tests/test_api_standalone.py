@@ -1,8 +1,11 @@
 """Standalone test script for Del-Co Water API (no Home Assistant dependencies)."""
 import json
 import os
+import re
 from datetime import datetime, timedelta
+from io import BytesIO
 
+import pdfplumber
 import requests
 from pycognito import Cognito
 from dotenv import load_dotenv
@@ -127,6 +130,163 @@ class DelCoWaterAPI:
         response.raise_for_status()
         return response.json()
 
+    def get_billing_history(self, start_date=None, end_date=None):
+        """Get billing history data."""
+        if not self._account_data:
+            self.get_account()
+
+        account_info = self._account_data.get("myAccount", {})
+        account_id = account_info.get("accountId")
+
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+
+        payload = {
+            "AccessToken": self.access_token,
+            "accountId": account_id,
+            "startDate": start_date,
+            "endDate": end_date,
+            "admin": False,
+            "email": self.username,
+        }
+
+        response = requests.post(
+            f"{API_BASE_URL}/history/billing",
+            headers=self._get_headers(),
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _get_bill_pdf_base_url(self):
+        """Get the base URL for bill PDFs."""
+        if not self._account_data:
+            self.get_account()
+
+        bill_url = self._account_data.get("myAccount", {}).get("billDisplayURL", "")
+        return bill_url.rsplit("/", 1)[0]
+
+    def get_bill_pdf(self, bill_id, bill_date):
+        """Download a bill PDF."""
+        if not self._account_data:
+            self.get_account()
+
+        base_url = self._get_bill_pdf_base_url()
+        account_id = self._account_data.get("myAccount", {}).get("accountId")
+        bill_date_formatted = bill_date.replace("-", "")
+
+        pdf_url = f"{base_url}/{account_id}_{bill_id}_{bill_date_formatted}.pdf"
+
+        response = requests.get(pdf_url, timeout=30)
+        if response.status_code == 200:
+            return response.content
+        return None
+
+    def parse_bill_pdf(self, pdf_content):
+        """Parse bill PDF to extract usage data."""
+        with pdfplumber.open(BytesIO(pdf_content)) as pdf:
+            if not pdf.pages:
+                return None
+
+            text = pdf.pages[0].extract_text()
+            if not text:
+                return None
+
+            # FORMAT 1 - NEW: Usage in GALLONS, no hyphen between dates
+            new_pattern = (
+                r"Water Residential Charge\s+.*?"
+                r"(\d{2}/\d{2}/\d{2})\s+(\d{2}/\d{2}/\d{2})\s+"
+                r"(\d+)\s+(\d+)\s+(\d+)\s+\$?([\d.]+)"
+            )
+            match = re.search(new_pattern, text)
+            if match:
+                return {
+                    "service_from": match.group(1),
+                    "service_to": match.group(2),
+                    "prior_reading": int(match.group(3)),
+                    "current_reading": int(match.group(4)),
+                    "usage_gallons": int(match.group(5)),
+                    "charges": float(match.group(6)),
+                    "format": "new_gallons",
+                }
+
+            # FORMAT 2 - MID: Usage in HGAL, hyphen between dates
+            mid_pattern = (
+                r"Water (?:Residential Charge|Charges[^\d]*)\s+.*?"
+                r"(\d{2}/\d{2}/\d{2})\s*-\s*(\d{2}/\d{2}/\d{2})\s+"
+                r"([\d,]+)\s+([\d,]+)\s+(\d+)\s+\$?([\d.]+)"
+            )
+            match = re.search(mid_pattern, text)
+            if match:
+                return {
+                    "service_from": match.group(1),
+                    "service_to": match.group(2),
+                    "prior_reading": int(match.group(3).replace(",", "")),
+                    "current_reading": int(match.group(4).replace(",", "")),
+                    "usage_gallons": int(match.group(5)) * 100,
+                    "charges": float(match.group(6)),
+                    "format": "mid_hgal",
+                }
+
+            # FORMAT 3 - OLD: Two-line format with meter ID
+            old_reading_pattern = (
+                r"(\d+)\s+(\d{2}/\d{2}/\d{2})\s*-\s*(\d{2}/\d{2}/\d{2})\s+"
+                r"Actual\s+([\d,]+)\s+([\d,]+)\s+(\d+)"
+            )
+            old_charge_pattern = (
+                r"Water Residential Service\s+\d+\s+"
+                r"TOTAL USAGE ALL METERS\s+(\d+)\s+[\d.]+\s+\$?([\d.]+)"
+            )
+
+            reading_match = re.search(old_reading_pattern, text)
+            charge_match = re.search(old_charge_pattern, text)
+
+            if reading_match and charge_match:
+                return {
+                    "service_from": reading_match.group(2),
+                    "service_to": reading_match.group(3),
+                    "prior_reading": int(reading_match.group(4).replace(",", "")),
+                    "current_reading": int(reading_match.group(5).replace(",", "")),
+                    "usage_gallons": int(reading_match.group(6)) * 100,
+                    "charges": float(charge_match.group(2)),
+                    "format": "old_hgal",
+                }
+
+            return None
+
+    def get_billing_with_usage(self, start_date=None, end_date=None):
+        """Get billing history enriched with per-period usage from PDFs."""
+        billing_data = self.get_billing_history(start_date, end_date)
+        results = []
+
+        for bill in billing_data.get("billing", []):
+            bill_id = bill.get("billId")
+            bill_date = bill.get("billDate")
+
+            if not bill_id or not bill_date:
+                continue
+
+            pdf_content = self.get_bill_pdf(bill_id, bill_date)
+            if not pdf_content:
+                continue
+
+            parsed = self.parse_bill_pdf(pdf_content)
+            if not parsed:
+                continue
+
+            results.append({
+                "bill_id": bill_id,
+                "bill_date": bill_date,
+                "read_date": bill.get("readDate"),
+                **parsed,
+            })
+
+        results.sort(key=lambda x: datetime.strptime(x["service_to"], "%m/%d/%y"))
+        return results
+
 
 def test_authentication():
     """Test authentication with Cognito."""
@@ -239,6 +399,50 @@ def test_usage_daily(api):
                     print(f"      {period}: {value} {uom}")
 
 
+def test_billing_history(api):
+    """Test getting billing history."""
+    print("\nTesting billing history...")
+    billing_data = api.get_billing_history()
+
+    print(f"✓ Billing history retrieved")
+    print(f"  Total bills: {len(billing_data.get('billing', []))}")
+
+    for bill in billing_data.get("billing", []):
+        print(f"  - {bill.get('billDate')}: ${bill.get('billAmount')} (read: {bill.get('readDate')})")
+
+
+def test_billing_with_usage(api):
+    """Test getting billing with usage from PDFs."""
+    print("\nTesting billing with usage (PDF parsing)...")
+    billing_with_usage = api.get_billing_with_usage()
+
+    print(f"✓ Billing with usage retrieved")
+    print(f"  Total bills parsed: {len(billing_with_usage)}")
+
+    print("\n  Per-Billing-Period Usage:")
+    print("  " + "-" * 70)
+    print(f"  {'Service Period':<25} {'Usage (gal)':<15} {'Cost':<12} {'Format'}")
+    print("  " + "-" * 70)
+
+    for bill in billing_with_usage:
+        period = f"{bill['service_from']} - {bill['service_to']}"
+        usage = f"{bill['usage_gallons']:,}"
+        cost = f"${bill['charges']:.2f}"
+        fmt = bill["format"]
+        print(f"  {period:<25} {usage:<15} {cost:<12} {fmt}")
+
+    # Verify totals match API
+    print("\n  Verification (grouped by service_to month):")
+    from collections import defaultdict
+    monthly = defaultdict(int)
+    for bill in billing_with_usage:
+        month = "20" + bill["service_to"][6:8] + "-" + bill["service_to"][0:2]
+        monthly[month] += bill["usage_gallons"] // 100  # HGAL
+
+    for month in sorted(monthly.keys()):
+        print(f"    {month}: {monthly[month]} HGAL")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -262,6 +466,12 @@ def main():
 
         # Test daily usage
         test_usage_daily(api)
+
+        # Test billing history
+        test_billing_history(api)
+
+        # Test billing with usage (PDF parsing)
+        test_billing_with_usage(api)
 
         print("\n" + "=" * 60)
         print("All tests completed successfully!")

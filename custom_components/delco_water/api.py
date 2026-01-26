@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from io import BytesIO
 import logging
+import re
 from typing import Any
 
+import pdfplumber
 import requests
 from pycognito import Cognito
 
@@ -253,3 +256,204 @@ class DelCoWaterAPI:
         except Exception as err:
             _LOGGER.error("Failed to get payment history: %s", err)
             raise
+
+    def _get_bill_pdf_base_url(self) -> str:
+        """Get the base URL for bill PDFs from account data."""
+        if not self._account_data:
+            self.get_account()
+
+        bill_url = self._account_data.get("myAccount", {}).get("billDisplayURL", "")
+        if not bill_url:
+            raise ValueError("No bill URL found in account data")
+
+        # Extract base URL (everything before the filename)
+        return bill_url.rsplit("/", 1)[0]
+
+    def get_bill_pdf(self, bill_id: str, bill_date: str) -> bytes | None:
+        """Download a bill PDF.
+
+        Args:
+            bill_id: The bill ID from billing history
+            bill_date: The bill date in YYYY-MM-DD format
+
+        Returns:
+            PDF content as bytes, or None if not found
+        """
+        try:
+            if not self._account_data:
+                self.get_account()
+
+            base_url = self._get_bill_pdf_base_url()
+            account_id = self._account_data.get("myAccount", {}).get("accountId")
+            bill_date_formatted = bill_date.replace("-", "")  # 2025-08-13 -> 20250813
+
+            pdf_url = f"{base_url}/{account_id}_{bill_id}_{bill_date_formatted}.pdf"
+
+            response = requests.get(pdf_url, timeout=30)
+            if response.status_code == 200:
+                return response.content
+
+            _LOGGER.warning(
+                "Bill PDF not found: %s (HTTP %d)", pdf_url, response.status_code
+            )
+            return None
+
+        except Exception as err:
+            _LOGGER.error("Failed to get bill PDF %s: %s", bill_id, err)
+            return None
+
+    def parse_bill_pdf(self, pdf_content: bytes) -> dict[str, Any] | None:
+        """Parse bill PDF to extract usage data.
+
+        Handles three known PDF formats:
+        - new_gallons: Usage in gallons, no hyphen between dates (2025-08+)
+        - mid_hgal: Usage in HGAL, hyphen between dates
+        - old_hgal: Two-line format with meter ID
+
+        Args:
+            pdf_content: Raw PDF bytes
+
+        Returns:
+            Dict with service_from, service_to, usage_gallons, charges, etc.
+            or None if parsing fails
+        """
+        try:
+            with pdfplumber.open(BytesIO(pdf_content)) as pdf:
+                if not pdf.pages:
+                    return None
+
+                text = pdf.pages[0].extract_text()
+                if not text:
+                    return None
+
+                # FORMAT 1 - NEW (2025-08+): Usage in GALLONS, no hyphen between dates
+                # Water Residential Charge ADDR PREMISE MM/DD/YY MM/DD/YY PRIOR CURR USAGE $CHG
+                new_pattern = (
+                    r"Water Residential Charge\s+.*?"
+                    r"(\d{2}/\d{2}/\d{2})\s+(\d{2}/\d{2}/\d{2})\s+"
+                    r"(\d+)\s+(\d+)\s+(\d+)\s+\$?([\d.]+)"
+                )
+                match = re.search(new_pattern, text)
+                if match:
+                    return {
+                        "service_from": match.group(1),
+                        "service_to": match.group(2),
+                        "prior_reading": int(match.group(3)),
+                        "current_reading": int(match.group(4)),
+                        "usage_gallons": int(match.group(5)),  # Already in gallons
+                        "charges": float(match.group(6)),
+                        "format": "new_gallons",
+                    }
+
+                # FORMAT 2 - MID: Usage in HGAL, hyphen between dates, commas in readings
+                # Water (Residential Charge|Charges...) ADDR PREMISE MM/DD/YY - MM/DD/YY ...
+                mid_pattern = (
+                    r"Water (?:Residential Charge|Charges[^\d]*)\s+.*?"
+                    r"(\d{2}/\d{2}/\d{2})\s*-\s*(\d{2}/\d{2}/\d{2})\s+"
+                    r"([\d,]+)\s+([\d,]+)\s+(\d+)\s+\$?([\d.]+)"
+                )
+                match = re.search(mid_pattern, text)
+                if match:
+                    return {
+                        "service_from": match.group(1),
+                        "service_to": match.group(2),
+                        "prior_reading": int(match.group(3).replace(",", "")),
+                        "current_reading": int(match.group(4).replace(",", "")),
+                        "usage_gallons": int(match.group(5)) * 100,  # HGAL to gallons
+                        "charges": float(match.group(6)),
+                        "format": "mid_hgal",
+                    }
+
+                # FORMAT 3 - OLD: Two-line format with meter ID
+                # METER_ID MM/DD/YY - MM/DD/YY Actual PRIOR CURRENT USAGE_HGAL
+                # Water Residential Service DAYS TOTAL USAGE ALL METERS HGAL GPD $CHARGE
+                old_reading_pattern = (
+                    r"(\d+)\s+(\d{2}/\d{2}/\d{2})\s*-\s*(\d{2}/\d{2}/\d{2})\s+"
+                    r"Actual\s+([\d,]+)\s+([\d,]+)\s+(\d+)"
+                )
+                old_charge_pattern = (
+                    r"Water Residential Service\s+\d+\s+"
+                    r"TOTAL USAGE ALL METERS\s+(\d+)\s+[\d.]+\s+\$?([\d.]+)"
+                )
+
+                reading_match = re.search(old_reading_pattern, text)
+                charge_match = re.search(old_charge_pattern, text)
+
+                if reading_match and charge_match:
+                    return {
+                        "service_from": reading_match.group(2),
+                        "service_to": reading_match.group(3),
+                        "prior_reading": int(reading_match.group(4).replace(",", "")),
+                        "current_reading": int(reading_match.group(5).replace(",", "")),
+                        "usage_gallons": int(reading_match.group(6)) * 100,  # HGAL
+                        "charges": float(charge_match.group(2)),
+                        "format": "old_hgal",
+                    }
+
+                _LOGGER.warning("Could not parse bill PDF - unknown format")
+                return None
+
+        except Exception as err:
+            _LOGGER.error("Failed to parse bill PDF: %s", err)
+            return None
+
+    def get_billing_with_usage(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get billing history enriched with per-period usage from PDFs.
+
+        This method fetches billing history and then downloads/parses each
+        bill PDF to extract the actual usage for each billing period.
+
+        Args:
+            start_date: Start date in YYYY-MM-DD format (defaults to 1 year ago)
+            end_date: End date in YYYY-MM-DD format (defaults to today)
+
+        Returns:
+            List of billing records with usage data included
+        """
+        billing_data = self.get_billing_history(start_date, end_date)
+        results = []
+
+        for bill in billing_data.get("billing", []):
+            bill_id = bill.get("billId")
+            bill_date = bill.get("billDate")
+
+            if not bill_id or not bill_date:
+                continue
+
+            pdf_content = self.get_bill_pdf(bill_id, bill_date)
+            if not pdf_content:
+                _LOGGER.warning(
+                    "Could not fetch PDF for bill %s (%s)", bill_id, bill_date
+                )
+                continue
+
+            parsed = self.parse_bill_pdf(pdf_content)
+            if not parsed:
+                _LOGGER.warning(
+                    "Could not parse PDF for bill %s (%s)", bill_id, bill_date
+                )
+                continue
+
+            # Merge billing API data with parsed PDF data
+            results.append({
+                "bill_id": bill_id,
+                "bill_date": bill_date,
+                "read_date": bill.get("readDate"),
+                "due_date": bill.get("dueDate"),
+                "bill_amount": bill.get("billAmount"),
+                **parsed,
+            })
+
+        # Sort by service_to date
+        results.sort(
+            key=lambda x: datetime.strptime(x["service_to"], "%m/%d/%y")
+        )
+
+        _LOGGER.info(
+            "Retrieved %d billing records with usage data", len(results)
+        )
+        return results
