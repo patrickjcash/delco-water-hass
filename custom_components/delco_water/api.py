@@ -118,7 +118,7 @@ class DelCoWaterAPI:
             if not end_date:
                 end_date = datetime.now().strftime("%Y-%m-%d")
             if not start_date:
-                start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+                start_date = (datetime.now() - timedelta(days=1095)).strftime("%Y-%m-%d")
 
             payload = {
                 "AccessToken": self.access_token,
@@ -185,7 +185,7 @@ class DelCoWaterAPI:
             if not end_date:
                 end_date = datetime.now().strftime("%Y-%m-%d")
             if not start_date:
-                start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+                start_date = (datetime.now() - timedelta(days=1095)).strftime("%Y-%m-%d")
 
             payload = {
                 "AccessToken": self.access_token,

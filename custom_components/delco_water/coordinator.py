@@ -111,8 +111,10 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
 
         return dt
 
-    async def _get_last_stat_time(self, statistic_id: str) -> datetime | None:
-        """Get the timestamp of the last inserted statistic."""
+    async def _get_last_stat(
+        self, statistic_id: str
+    ) -> tuple[datetime | None, float]:
+        """Get the timestamp and cumulative sum of the last inserted statistic."""
         try:
             last_stats = await get_instance(self.hass).async_add_executor_job(
                 get_last_statistics,
@@ -120,21 +122,24 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
                 1,
                 statistic_id,
                 True,
-                set(),
+                {"sum"},
             )
 
             if last_stats and statistic_id in last_stats:
                 stats_list = last_stats[statistic_id]
                 if stats_list and len(stats_list) > 0:
                     last_stat = stats_list[0]
+                    last_time = None
                     if "start" in last_stat:
-                        return datetime.fromtimestamp(
+                        last_time = datetime.fromtimestamp(
                             last_stat["start"], tz=timezone.utc
                         )
+                    last_sum = last_stat.get("sum", 0.0) or 0.0
+                    return last_time, last_sum
         except Exception as err:
             _LOGGER.warning("Failed to get last statistics for %s: %s", statistic_id, err)
 
-        return None
+        return None, 0.0
 
     async def _insert_statistics(self, data: dict) -> None:
         """Insert long-term statistics for consumption and cost.
@@ -149,18 +154,27 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("No billing data with usage available from PDFs")
             return
 
-        # Get last inserted statistics to avoid duplicates
-        last_consumption_time = await self._get_last_stat_time(STATISTIC_CONSUMPTION)
-        last_cost_time = await self._get_last_stat_time(STATISTIC_COST)
+        # Get last inserted statistics to avoid duplicates and continue sums
+        last_consumption_time, consumption_sum = await self._get_last_stat(
+            STATISTIC_CONSUMPTION
+        )
+        last_cost_time, cost_sum = await self._get_last_stat(STATISTIC_COST)
 
-        _LOGGER.debug("Last consumption time: %s", last_consumption_time)
-        _LOGGER.debug("Last cost time: %s", last_cost_time)
+        _LOGGER.debug(
+            "Last consumption: time=%s, sum=%s", last_consumption_time, consumption_sum
+        )
+        _LOGGER.debug("Last cost: time=%s, sum=%s", last_cost_time, cost_sum)
 
-        # Build statistics lists
+        # Build statistics lists — only for new bills
         consumption_statistics = []
         cost_statistics = []
-        consumption_sum = 0.0
-        cost_sum = 0.0
+
+        # Use the earlier of the two last-stat times to determine cutoff
+        last_time = None
+        if last_consumption_time and last_cost_time:
+            last_time = min(last_consumption_time, last_cost_time)
+        else:
+            last_time = last_consumption_time or last_cost_time
 
         # Process billing data (already sorted by service_to in API)
         for bill in billing_with_usage:
@@ -169,33 +183,33 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
                 # This is when the meter was read
                 period_start = self._parse_service_date(bill["service_to"])
 
+                # Skip bills we've already recorded
+                if last_time and period_start <= last_time:
+                    continue
+
                 # Get values
                 gallons = float(bill["usage_gallons"])
                 cost = float(bill["charges"])
 
-                # Update cumulative sums (always, even for skipped periods)
+                # Continue cumulative sums from last known values
                 consumption_sum += gallons
                 cost_sum += cost
 
-                # Insert consumption statistic if not already present
-                if not last_consumption_time or period_start > last_consumption_time:
-                    consumption_statistics.append(
-                        StatisticData(
-                            start=period_start,
-                            state=gallons,  # This period's usage
-                            sum=consumption_sum,  # Cumulative total
-                        )
+                consumption_statistics.append(
+                    StatisticData(
+                        start=period_start,
+                        state=gallons,  # This period's usage
+                        sum=consumption_sum,  # Cumulative total
                     )
+                )
 
-                # Insert cost statistic if not already present
-                if not last_cost_time or period_start > last_cost_time:
-                    cost_statistics.append(
-                        StatisticData(
-                            start=period_start,
-                            state=cost,  # This period's cost
-                            sum=cost_sum,  # Cumulative total
-                        )
+                cost_statistics.append(
+                    StatisticData(
+                        start=period_start,
+                        state=cost,  # This period's cost
+                        sum=cost_sum,  # Cumulative total
                     )
+                )
 
             except (ValueError, TypeError, KeyError) as err:
                 _LOGGER.warning("Failed to process billing record %s: %s", bill, err)
