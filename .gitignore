@@ -45,3 +45,6 @@ Thumbs.db
 .coverage
 htmlcov/
 *.log
+
+# Local one-off tools (contain personal info — not for publishing)
+tools/
