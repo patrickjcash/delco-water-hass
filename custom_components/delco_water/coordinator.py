@@ -80,19 +80,28 @@ class DelCoWaterCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error communicating with API: {err}") from err
 
     def _parse_service_date(self, date_str: str) -> datetime:
-        """Parse service date (MM/DD/YY) to timezone-aware datetime.
+        """Parse service date to timezone-aware datetime.
 
+        Handles both MM/DD/YY (2-digit year) and MM/DD/YYYY (4-digit year) formats.
         Uses Home Assistant's local timezone to ensure dates appear correctly
         in the Energy Dashboard regardless of UTC offset.
 
         Args:
-            date_str: Date in MM/DD/YY format (e.g., "08/29/25")
+            date_str: Date in MM/DD/YY or MM/DD/YYYY format (e.g., "08/29/25" or "03/03/2026")
 
         Returns:
             Timezone-aware datetime at noon local time (to avoid date shifts)
         """
-        # Parse the date
-        dt = datetime.strptime(date_str, "%m/%d/%y")
+        # Parse the date, trying 4-digit year first
+        dt = None
+        for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            raise ValueError(f"Cannot parse service date: {date_str}")
 
         # Get HA's configured timezone
         local_tz = dt_util.get_time_zone(self.hass.config.time_zone)

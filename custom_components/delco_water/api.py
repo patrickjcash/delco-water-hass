@@ -328,9 +328,10 @@ class DelCoWaterAPI:
 
                 # FORMAT 1 - NEW (2025-08+): Usage in GALLONS, no hyphen between dates
                 # Water Residential Charge ADDR PREMISE MM/DD/YY MM/DD/YY PRIOR CURR USAGE $CHG
+                # Also handles 4-digit years (2026-03+): MM/DD/YYYY MM/DD/YYYY
                 new_pattern = (
                     r"Water Residential Charge\s+.*?"
-                    r"(\d{2}/\d{2}/\d{2})\s+(\d{2}/\d{2}/\d{2})\s+"
+                    r"(\d{2}/\d{2}/\d{2,4})\s+(\d{2}/\d{2}/\d{2,4})\s+"
                     r"(\d+)\s+(\d+)\s+(\d+)\s+\$?([\d.]+)"
                 )
                 match = re.search(new_pattern, text)
@@ -448,10 +449,16 @@ class DelCoWaterAPI:
                 **parsed,
             })
 
-        # Sort by service_to date
-        results.sort(
-            key=lambda x: datetime.strptime(x["service_to"], "%m/%d/%y")
-        )
+        # Sort by service_to date (handles both 2-digit and 4-digit years)
+        def _parse_date(date_str: str) -> datetime:
+            for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+                try:
+                    return datetime.strptime(date_str, fmt)
+                except ValueError:
+                    continue
+            raise ValueError(f"Cannot parse date: {date_str}")
+
+        results.sort(key=lambda x: _parse_date(x["service_to"]))
 
         _LOGGER.info(
             "Retrieved %d billing records with usage data", len(results)
