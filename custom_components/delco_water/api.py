@@ -257,17 +257,31 @@ class DelCoWaterAPI:
             _LOGGER.error("Failed to get payment history: %s", err)
             raise
 
-    def _get_bill_pdf_base_url(self) -> str:
-        """Get the base URL for bill PDFs from account data."""
-        if not self._account_data:
-            self.get_account()
+    def _get_bill_pdf_url(self, bill_id: str) -> str | None:
+        """Request the download URL for a bill PDF."""
+        payload = {
+            "email": self.username,
+            "billId": bill_id,
+            "isAdmin": False,
+            "AccessToken": self.access_token,
+        }
 
-        bill_url = self._account_data.get("myAccount", {}).get("billDisplayURL", "")
-        if not bill_url:
-            raise ValueError("No bill URL found in account data")
+        response = requests.post(
+            f"{API_BASE_URL}/billing/getBillURL",
+            headers=self._get_headers(),
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
 
-        # Extract base URL (everything before the filename)
-        return bill_url.rsplit("/", 1)[0]
+        response_data = response.json()
+        bill_data = response_data.get("data", response_data)
+        bill_url = bill_data.get("onlineBillURL")
+        if bill_url:
+            return bill_url
+
+        _LOGGER.debug("Bill PDF URL unavailable for bill %s", bill_id)
+        return None
 
     def get_bill_pdf(self, bill_id: str, bill_date: str) -> bytes | None:
         """Download a bill PDF.
@@ -280,14 +294,9 @@ class DelCoWaterAPI:
             PDF content as bytes, or None if not found
         """
         try:
-            if not self._account_data:
-                self.get_account()
-
-            base_url = self._get_bill_pdf_base_url()
-            account_id = self._account_data.get("myAccount", {}).get("accountId")
-            bill_date_formatted = bill_date.replace("-", "")  # 2025-08-13 -> 20250813
-
-            pdf_url = f"{base_url}/{account_id}_{bill_id}_{bill_date_formatted}.pdf"
+            pdf_url = self._get_bill_pdf_url(bill_id)
+            if not pdf_url:
+                return None
 
             response = requests.get(pdf_url, timeout=30)
             if response.status_code == 200:
@@ -427,7 +436,7 @@ class DelCoWaterAPI:
 
             pdf_content = self.get_bill_pdf(bill_id, bill_date)
             if not pdf_content:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "Could not fetch PDF for bill %s (%s)", bill_id, bill_date
                 )
                 continue

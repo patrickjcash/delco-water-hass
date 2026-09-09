@@ -66,6 +66,10 @@ del-co-water-usage/
    - Returns installation/connection auth token
    - Body: `{"AccessToken": "..."}`
 
+4. **POST /billing/getBillURL**
+   - Returns the Oracle Cloud Storage URL for an individual bill PDF
+   - Body: `{"AccessToken": "...", "email": "...", "billId": "...", "isAdmin": false}`
+
 ### Data Format
 
 Usage data is returned in HGAL (hundred gallons):

@@ -136,7 +136,7 @@ This integration uses the Del-Co Water portal API (powered by Sparqr/ESC):
 - `/usage` - Monthly aggregated usage (for sensors)
 - `/history/billing` - Billing history with read dates
 - `/history/payment` - Payment history
-- Bill PDFs via `billDisplayURL` pattern
+- `/billing/getBillURL` - Per-bill Oracle Cloud Storage download URL
 
 **Why PDF parsing?**
 The `/usage` endpoint returns data aggregated by calendar month, which causes issues when:

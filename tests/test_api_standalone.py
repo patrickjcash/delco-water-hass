@@ -161,24 +161,30 @@ class DelCoWaterAPI:
         response.raise_for_status()
         return response.json()
 
-    def _get_bill_pdf_base_url(self):
-        """Get the base URL for bill PDFs."""
-        if not self._account_data:
-            self.get_account()
-
-        bill_url = self._account_data.get("myAccount", {}).get("billDisplayURL", "")
-        return bill_url.rsplit("/", 1)[0]
+    def _get_bill_pdf_url(self, bill_id):
+        """Request the download URL for a bill PDF."""
+        payload = {
+            "email": self.username,
+            "billId": bill_id,
+            "isAdmin": False,
+            "AccessToken": self.access_token,
+        }
+        response = requests.post(
+            f"{API_BASE_URL}/billing/getBillURL",
+            headers=self._get_headers(),
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        response_data = response.json()
+        bill_data = response_data.get("data", response_data)
+        return bill_data.get("onlineBillURL") or None
 
     def get_bill_pdf(self, bill_id, bill_date):
         """Download a bill PDF."""
-        if not self._account_data:
-            self.get_account()
-
-        base_url = self._get_bill_pdf_base_url()
-        account_id = self._account_data.get("myAccount", {}).get("accountId")
-        bill_date_formatted = bill_date.replace("-", "")
-
-        pdf_url = f"{base_url}/{account_id}_{bill_id}_{bill_date_formatted}.pdf"
+        pdf_url = self._get_bill_pdf_url(bill_id)
+        if not pdf_url:
+            return None
 
         response = requests.get(pdf_url, timeout=30)
         if response.status_code == 200:
@@ -198,7 +204,7 @@ class DelCoWaterAPI:
             # FORMAT 1 - NEW: Usage in GALLONS, no hyphen between dates
             new_pattern = (
                 r"Water Residential Charge\s+.*?"
-                r"(\d{2}/\d{2}/\d{2})\s+(\d{2}/\d{2}/\d{2})\s+"
+                r"(\d{2}/\d{2}/\d{2,4})\s+(\d{2}/\d{2}/\d{2,4})\s+"
                 r"(\d+)\s+(\d+)\s+(\d+)\s+\$?([\d.]+)"
             )
             match = re.search(new_pattern, text)
@@ -284,7 +290,15 @@ class DelCoWaterAPI:
                 **parsed,
             })
 
-        results.sort(key=lambda x: datetime.strptime(x["service_to"], "%m/%d/%y"))
+        def _parse_date(date_str):
+            for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+                try:
+                    return datetime.strptime(date_str, fmt)
+                except ValueError:
+                    continue
+            raise ValueError(f"Cannot parse date: {date_str}")
+
+        results.sort(key=lambda x: _parse_date(x["service_to"]))
         return results
 
 
